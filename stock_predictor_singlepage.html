@@ -1,0 +1,96 @@
+<!doctype html>
+<html>
+<head>
+<meta charset='utf-8'/>
+<title>Stock Trend Predictor — Interactive</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+  body{font-family:Inter, system-ui, -apple-system; background: linear-gradient(120deg,#0f1724,#071029); color:#e6eef8; margin:0; padding:24px;}
+  .card{background:linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.01)); border-radius:14px; padding:18px; box-shadow:0 10px 30px rgba(2,6,23,0.7); max-width:1100px; margin:12px auto;}
+  .controls{display:flex; gap:12px; align-items:center; flex-wrap:wrap;}
+  input[type=file]{background:rgba(255,255,255,0.02); padding:8px; border-radius:8px; color:inherit; border:1px solid rgba(255,255,255,0.04);}
+  button{background:linear-gradient(90deg,#7c3aed,#06b6d4); color:white; border:none; padding:10px 14px; border-radius:10px; cursor:pointer;}
+  .mutebtn{background:transparent; border:1px solid rgba(255,255,255,0.06);}
+  .grid{display:grid; grid-template-columns: 1fr 360px; gap:18px;}
+  table{width:100%; border-collapse:collapse; color:#e6eef8;}
+  th,td{padding:6px 8px; border-bottom:1px dashed rgba(255,255,255,0.03); font-size:13px;}
+  .small{font-size:12px; color:#9fb3d6;}
+  .download{background:#10b981;}
+  .stat{background:linear-gradient(90deg, rgba(124,58,237,0.08), rgba(6,182,212,0.06)); padding:10px; border-radius:10px;}
+</style>
+</head>
+<body>
+<div class="card">
+  <h2>Stock Trend Predictor — Interactive</h2>
+  <div class="controls">
+    <input id="file" type="file" accept=".csv"/>
+    <label>Days to predict: <input id="days" type="number" value="3" style="width:64px; margin-left:6px;"/></label>
+    <button id="predictBtn">Predict</button>
+    <button id="downloadBtn" class="download small">Download last predictions</button>
+  </div>
+  <div style="height:12px"></div>
+  <div class="grid">
+    <div>
+      <canvas id="chart" height="220"></canvas>
+      <div style="margin-top:12px;">
+        <div class="stat" id="summary">Model metrics: loading...</div>
+      </div>
+      <h4 class="small">History (last 50 rows)</h4>
+      <div style="max-height:260px; overflow:auto; background:rgba(255,255,255,0.01); padding:8px; border-radius:8px;">
+        <table id="historyTable"><thead><tr><th>Date</th><th>Close</th></tr></thead><tbody></tbody></table>
+      </div>
+    </div>
+    <div>
+      <div style="background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01)); padding:12px; border-radius:12px;">
+        <h3 style="margin:0 0 8px 0">Next Predictions</h3>
+        <div id="predList"></div>
+        <div style="height:12px"></div>
+        <div style="display:flex; gap:8px; flex-direction:column;">
+          <div class="small">Download predictions CSV:</div>
+          <a id="dlLink" class="download small" href="#" style="text-decoration:none; color:white; padding:8px; display:inline-block; width:100%; text-align:center;">Download CSV</a>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+let lastPredictions = null;
+document.getElementById('predictBtn').onclick = async ()=>{
+  const fileEl = document.getElementById('file');
+  const days = parseInt(document.getElementById('days').value)||1;
+  const fd = new FormData();
+  fd.append('days', days);
+  if(fileEl.files.length>0) fd.append('file', fileEl.files[0]);
+  else { alert('Please upload a CSV file to use for prediction.'); return; }
+  const resp = await fetch('/predict', {method:'POST', body:fd});
+  const j = await resp.json();
+  if(!resp.ok){ alert('Predict error: '+(j.error||resp.status)); return; }
+  const history = j.history;
+  const preds = j.predictions;
+  lastPredictions = preds;
+  const labels = history.map(r=>r.Date).concat(preds.map(p=>p.Date));
+  const hist = history.map(r=>parseFloat(r.Close));
+  const predData = new Array(history.length).fill(null).concat(preds.map(p=>parseFloat(p.Predicted_Close)));
+  const ctx = document.getElementById('chart').getContext('2d');
+  if(window.myChart) window.myChart.destroy();
+  window.myChart = new Chart(ctx, {type:'line', data:{labels:labels, datasets:[{label:'Close', data:hist.concat(new Array(preds.length).fill(null)), tension:0.2, borderWidth:2},{label:'Predicted', data:predData, borderDash:[6,6], tension:0.2, borderWidth:2}]}, options:{scales:{x:{display:true}}}});
+  const tbody = document.querySelector('#historyTable tbody'); tbody.innerHTML='';
+  history.slice(-50).reverse().forEach(row=>{ const tr=document.createElement('tr'); tr.innerHTML=`<td>${row.Date}</td><td>${parseFloat(row.Close).toFixed(2)}</td>`; tbody.appendChild(tr); });
+  const predList = document.getElementById('predList'); predList.innerHTML='';
+  preds.forEach(p=>{ const div=document.createElement('div'); div.style.padding='8px'; div.style.borderBottom='1px solid rgba(255,255,255,0.03)'; div.innerHTML=`<strong>${p.Date}</strong>: ${parseFloat(p.Predicted_Close).toFixed(2)} <span class="small"> (Range: ${parseFloat(p.Fluctuation_low).toFixed(2)} — ${parseFloat(p.Fluctuation_high).toFixed(2)})</span>`; predList.appendChild(div); });
+  // prepare CSV download
+  const csvRows = [['Date','Predicted_Close','Fluctuation_low','Fluctuation_high']].concat(preds.map(p=>[p.Date, p.Predicted_Close, p.Fluctuation_low, p.Fluctuation_high]));
+  const csvContent = csvRows.map(r=>r.join(',')).join('\\n');
+  const blob = new Blob([csvContent], {type:'text/csv'});
+  const url = URL.createObjectURL(blob);
+  document.getElementById('dlLink').href = url;
+  document.getElementById('dlLink').download = 'predictions.csv';
+  document.getElementById('summary').innerText = 'Model metrics: loaded from server.';
+}
+document.getElementById('downloadBtn').onclick = ()=>{
+  if(!lastPredictions){ alert('No predictions yet'); return; }
+  document.getElementById('dlLink').click();
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Stock Predictor — Upload & Predict</title>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/babel-standalone@6.26.0/babel.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    :root{--bg:#071029; --card:#071126; --accent1:#7c3aed; --accent2:#06b6d4; --muted:#9fb3d6;}
+    body{margin:0; font-family:Inter, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial; background: linear-gradient(180deg,#071029,#04101a); color:#e6eef8;}
+    .wrap{max-width:1100px;margin:28px auto;padding:18px;}
+    .card{background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01)); padding:18px;border-radius:12px;box-shadow:0 8px 30px rgba(3,7,18,0.7);}
+    .row{display:flex;gap:12px;align-items:center;}
+    .uploader{border:2px dashed rgba(255,255,255,0.06); padding:18px; border-radius:10px; text-align:center; cursor:pointer; background:linear-gradient(180deg, rgba(124,58,237,0.02), rgba(6,182,212,0.01));}
+    input[type=file]{display:none;}
+    table{width:100%;border-collapse:collapse;margin-top:8px;}
+    th,td{padding:6px 8px;border-bottom:1px solid rgba(255,255,255,0.03);font-size:13px;text-align:left;color:#e6eef8;}
+    select{padding:6px;border-radius:8px;background:transparent;border:1px solid rgba(255,255,255,0.06);color:inherit;}
+    .btn{background:linear-gradient(90deg,var(--accent1),var(--accent2)); color:white;padding:8px 12px;border-radius:10px;border:none;cursor:pointer;}
+    .muted{color:var(--muted);font-size:13px;}
+    .small{font-size:12px;color:var(--muted);}
+    .flexcol{display:flex;flex-direction:column;gap:8px;}
+    .sidebar{width:360px;}
+    canvas{max-width:100%;}
+    .maprow{display:flex;gap:8px;align-items:center;margin-top:8px;}
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+<script type="text/babel">
+
+const {useState, useRef, useEffect} = React;
+
+function parseCSV(text, delimiter=',') {
+  const lines = text.trim().split(/\r?\n/);
+  const headers = lines[0].split(delimiter).map(h=>h.trim());
+  const rows = lines.slice(1).map(line=>line.split(delimiter).map(c=>c.trim()));
+  const data = rows.map(r => {
+    const obj = {};
+    headers.forEach((h,i)=> obj[h]=r[i]!==undefined?r[i]:"");
+    return obj;
+  });
+  return {headers, data};
+}
+
+function App(){
+  const [fileName, setFileName] = useState(null);
+  const [headers, setHeaders] = useState([]);
+  const [previewRows, setPreviewRows] = useState([]);
+  const [mapping, setMapping] = useState({Date:'', Close:'', Volume:''});
+  const [error, setError] = useState('');
+  const [predictions, setPredictions] = useState([]);
+  const [history, setHistory] = useState([]);
+  const [days, setDays] = useState(3);
+  const fileRef = useRef();
+  const chartRef = useRef();
+
+  useEffect(()=>{
+    if(predictions.length>0){
+      renderChart();
+    }
+  }, [predictions, history]);
+
+  function handleDrop(e){
+    e.preventDefault();
+    const f = e.dataTransfer.files[0];
+    handleFile(f);
+  }
+  function handleFile(inputFile){
+    if(!inputFile) return;
+    const reader = new FileReader();
+    reader.onload = (ev)=>{
+      const text = ev.target.result;
+      const parsed = parseCSV(text);
+      setFileName(inputFile.name);
+      setHeaders(parsed.headers);
+      setPreviewRows(parsed.data.slice(0,10));
+      // auto map common names
+      const lower = parsed.headers.map(h=>h.toLowerCase());
+      const map = {...mapping};
+      const find = name => {
+        const idx = lower.findIndex(h => h.includes(name.toLowerCase()));
+        return idx>=0 ? parsed.headers[idx] : '';
+      }
+      map.Date = find('date') || find('timestamp') || parsed.headers[0]||'';
+      map.Close = find('close') || find('adj close') || find('last')||'';
+      map.Volume = find('volume') || find('shares') || '';
+      setMapping(map);
+      setError('');
+      // store parsed raw for later upload
+      window._uploaded_csv_text = text;
+    };
+    reader.readAsText(inputFile);
+  }
+
+  function handleInputChange(e){
+    handleFile(e.target.files[0]);
+  }
+
+  function validateMapping(){
+    // ensure required fields present
+    if(!mapping.Date || !mapping.Close){
+      setError('Please map Date and Close columns before predicting.');
+      return false;
+    }
+    // ensure headers include mapping values
+    if(!headers.includes(mapping.Date) || !headers.includes(mapping.Close)){
+      setError('Mapped columns not found in uploaded CSV headers.');
+      return false;
+    }
+    setError('');
+    return true;
+  }
+
+  async function onPredict(){
+    if(!window._uploaded_csv_text){ setError('Upload a CSV file first.'); return; }
+    if(!validateMapping()) return;
+    // build a normalized CSV to send to server with columns Date, Close, Volume (if mapped)
+    const lines = window._uploaded_csv_text.trim().split(/\r?\n/);
+    const delim = lines[0].includes(';')?';':',';
+    const parsed = parseCSV(window._uploaded_csv_text, delim);
+    const outRows = [];
+    const head = ['Date','Close','Volume'];
+    outRows.push(head.join(','));
+    parsed.data.forEach(r=>{
+      const dateVal = r[mapping.Date] || '';
+      const closeVal = r[mapping.Close] || '';
+      const volVal = mapping.Volume ? (r[mapping.Volume]||'') : '';
+      outRows.push([dateVal, closeVal, volVal].join(','));
+    });
+    const blob = new Blob([outRows.join('\\n')], {type:'text/csv'});
+    const fd = new FormData();
+    fd.append('file', blob, fileName||'upload.csv');
+    fd.append('days', days);
+    setError('Uploading & predicting...');
+    try{
+      const resp = await fetch('/predict', {method:'POST', body:fd});
+      const j = await resp.json();
+      if(!resp.ok){ setError('Server error: '+(j.error||resp.status)); return; }
+      setPredictions(j.predictions);
+      setHistory(j.history);
+      setError('');
+    }catch(err){
+      setError('Request failed: '+err.message);
+    }
+  }
+
+  function renderChart(){
+    const labels = history.map(h=>h.Date).concat(predictions.map(p=>p.Date));
+    const hist = history.map(h=>parseFloat(h.Close));
+    const preds = new Array(history.length).fill(null).concat(predictions.map(p=>parseFloat(p.Predicted_Close)));
+    const ctx = chartRef.current.getContext('2d');
+    if(window._chart) window._chart.destroy();
+    window._chart = new Chart(ctx, {type:'line', data:{labels, datasets:[{label:'Close', data:hist.concat(new Array(predictions.length).fill(null)), tension:0.2,borderWidth:2},{label:'Predicted', data:preds, borderDash:[6,6], tension:0.2,borderWidth:2}]}, options:{scales:{x:{display:true}}}});
+  }
+
+  function downloadPredictions(){
+    if(!predictions.length) return alert('No predictions');
+    const rows = [['Date','Predicted_Close','Fluctuation_low','Fluctuation_high']].concat(predictions.map(p=>[p.Date,p.Predicted_Close,p.Fluctuation_low,p.Fluctuation_high]));
+    const csv = rows.map(r=>r.join(',')).join('\\n');
+    const url = URL.createObjectURL(new Blob([csv], {type:'text/csv'}));
+    const a = document.createElement('a'); a.href = url; a.download = 'predictions.csv'; a.click();
+  }
+
+  return <div className="wrap">
+    <div className="card">
+      <h2>Stock Trend Predictor — Upload & Predict</h2>
+      <div className="row" style={{marginTop:12}}>
+        <div style={{flex:1}}>
+          <div className="uploader" onDrop={handleDrop} onDragOver={(e)=>e.preventDefault()} onClick={()=>fileRef.current.click()}>
+            <input ref={fileRef} type="file" accept=".csv" onChange={e=>handleInputChange(e)} />
+            <div style={{fontWeight:700}}>{fileName||'Click or drag & drop a CSV file here'}</div>
+            <div className="small">Required: Date & Close columns. Optional: Volume. We'll help map similar names.</div>
+          </div>
+          {error && <div style={{color:'#ffb4b4',marginTop:8}}>{error}</div>}
+          {headers.length>0 && <div style={{marginTop:12}}>
+            <div className="small">Detected columns:</div>
+            <table><thead><tr>{headers.map(h=> <th key={h}>{h}</th>)}</tr></thead></table>
+            <div style={{marginTop:8}} className="maprow">
+              <div className="small">Map Date: <select value={mapping.Date} onChange={e=>setMapping({...mapping, Date:e.target.value})}>{[''].concat(headers).map(h=> <option key={h} value={h}>{h||'(none)'}</option>)}</select></div>
+              <div className="small">Map Close: <select value={mapping.Close} onChange={e=>setMapping({...mapping, Close:e.target.value})}>{[''].concat(headers).map(h=> <option key={h} value={h}>{h||'(none)'}</option>)}</select></div>
+              <div className="small">Map Volume: <select value={mapping.Volume} onChange={e=>setMapping({...mapping, Volume:e.target.value})}>{[''].concat(headers).map(h=> <option key={h} value={h}>{h||'(none)'}</option>)}</select></div>
+            </div>
+            <div style={{marginTop:10}} className="small">Preview (first 10 rows):</div>
+            <table><thead><tr>{headers.map(h=> <th key={h}>{h}</th>)}</tr></thead><tbody>{previewRows.map((r,idx)=> <tr key={idx}>{headers.map(h=> <td key={h}>{r[h]}</td>)}</tr>)}</tbody></table>
+          </div>}
+        </div>
+        <div className="sidebar">
+          <div style={{display:'flex',gap:8,alignItems:'center'}}>
+            <label className="small">Days:</label>
+            <input type="number" value={days} onChange={e=>setDays(parseInt(e.target.value)||1)} style={{width:70,padding:6,borderRadius:8,background:'transparent',border:'1px solid rgba(255,255,255,0.06)'}}/>
+            <button className="btn" onClick={onPredict}>Predict</button>
+          </div>
+          <div style={{marginTop:12}} className="small">Actions</div>
+          <div style={{display:'flex',gap:8,marginTop:8}}>
+            <button className="btn" onClick={downloadPredictions}>Download Predictions</button>
+          </div>
+          <div style={{marginTop:14}}>
+            <div className="small">Model info</div>
+            <div className="muted">RandomForest (plug-and-play). If LSTM model is present, backend will prefer LSTM.</div>
+          </div>
+        </div>
+      </div>
+      <div style={{marginTop:18}}>
+        <canvas ref={chartRef} id="chartCanvas" height="220"></canvas>
+      </div>
+      <div style={{marginTop:12}}>
+        <h4 className="small">Predictions</h4>
+        <div>{predictions.map(p=> <div key={p.Date} style={{padding:8,borderBottom:'1px solid rgba(255,255,255,0.03)'}}><strong>{p.Date}</strong>: {Number(p.Predicted_Close).toFixed(2)} <span className="small">Range: {Number(p.Fluctuation_low).toFixed(2)} — {Number(p.Fluctuation_high).toFixed(2)}</span></div>)}</div>
+      </div>
+    </div>
+  </div>
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
